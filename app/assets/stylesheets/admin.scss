@@ -137,6 +137,32 @@ body {
   }
 }
 
+a[href="/admin/super_mega_dashboard"] {
+  &.btn-primary,
+  &.btn-primary-dark {
+    background-image: url("mask/title.webp");
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+  }
+
+  &.btn-primary {
+    background-color: var(--color-blue-500);
+
+    &:hover {
+      background-color: var(--color-blue-400);
+    }
+  }
+
+  &.btn-primary-dark {
+    background-color: var(--color-blue-600);
+
+    &:hover {
+      background-color: var(--color-blue-500);
+    }
+  }
+}
+
 .btn-secondary {
   @extend %btn-base;
   background: #6b7280;
