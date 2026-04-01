@@ -22,26 +22,11 @@ module Admin
       sw_vibes_data
       super_mega_funnel_stats
       super_mega_nps_stats
+      super_mega_hcb_stats
     ].freeze
 
     def index
       authorize :admin, :access_super_mega_dashboard?
-
-      load_fraud_stats
-      load_payouts_stats
-      load_fulfillment_stats_safely
-      load_support_stats
-      load_support_vibes_stats
-      load_support_graph_data
-      load_voting_stats
-      load_sidequest_stats
-      load_ysws_review_stats
-      load_flavortime_summary
-      load_pyramid_scheme_stats
-      load_community_engagement_stats
-      load_fraud_happiness_data
-      load_funnel_stats
-      load_nps_stats
     end
 
     def load_section
@@ -50,14 +35,65 @@ module Admin
       section = params[:section]
 
       case section
+      when "funnel"
+        load_funnel_stats
+        render partial: "admin/super_mega_dashboard/sections/funnel", layout: false
+      when "nps"
+        load_nps_stats
+        render partial: "admin/super_mega_dashboard/sections/nps", layout: false
+      when "hcb"
+        load_hcb_expenses
+        render partial: "admin/super_mega_dashboard/sections/hcb", layout: false
+      when "fraud"
+        load_fraud_stats
+        load_fraud_happiness_data
+        render partial: "admin/super_mega_dashboard/sections/fraud", layout: false
+      when "payouts"
+        load_payouts_stats
+        render partial: "admin/super_mega_dashboard/sections/payouts", layout: false
+      when "fulfillment"
+        load_fulfillment_stats_safely
+        render partial: "admin/super_mega_dashboard/sections/fulfillment", layout: false
       when "shipwrights"
         load_ship_certs_stats
         load_sw_vibes_stats
         load_sw_vibes_history
         render partial: "admin/super_mega_dashboard/sections/shipwrights", layout: false
+      when "support"
+        load_support_stats
+        load_support_vibes_stats
+        load_support_graph_data
+        render partial: "admin/super_mega_dashboard/sections/support", layout: false
+      when "ysws_review"
+        load_ysws_review_stats
+        render partial: "admin/super_mega_dashboard/sections/ysws_review", layout: false
+      when "voting"
+        load_voting_stats
+        render partial: "admin/super_mega_dashboard/sections/voting", layout: false
+      when "community"
+        load_community_engagement_stats
+        render partial: "admin/super_mega_dashboard/sections/community", layout: false
+      when "pyramid_flavortime"
+        load_flavortime_summary
+        load_pyramid_scheme_stats
+        render partial: "admin/super_mega_dashboard/sections/pyramid_flavortime", layout: false
+      when "sidequests"
+        load_sidequest_stats
+        render partial: "admin/super_mega_dashboard/sections/sidequests", layout: false
       else
         render plain: "Unknown section", status: :bad_request
       end
+    end
+
+    def clear_cache
+      authorize :admin, :access_super_mega_dashboard?
+
+      CACHE_KEYS.each do |key|
+        Rails.cache.delete(key)
+      end
+
+      flash[:notice] = "Cache cleared successfully."
+      redirect_to admin_super_mega_dashboard_path
     end
 
     private
@@ -174,63 +210,71 @@ module Admin
 
     def build_ban_trend_data
       Rails.cache.fetch("super_mega_ban_trend", expires_in: 1.hour) do
-        trend_data = {}
-        # Get data for last 30 days
-        (0..29).reverse_each do |days_ago|
+        window_start = 29.days.ago.beginning_of_day
+        window_end = Time.current.end_of_day
+
+        base_scope = PaperTrail::Version.where(item_type: "User", created_at: window_start..window_end)
+
+        bans_by_date = base_scope
+          .where("object_changes ->> 'banned' IS NOT NULL")
+          .where("object_changes -> 'banned' ->> 1 = ?", "true")
+          .group(Arel.sql("DATE(created_at)")).count
+
+        unbans_by_date = base_scope
+          .where("object_changes ->> 'banned' IS NOT NULL")
+          .where("object_changes -> 'banned' ->> 1 = ?", "false")
+          .group(Arel.sql("DATE(created_at)")).count
+
+        shadow_bans_by_date = base_scope
+          .where("object_changes ->> 'shadow_banned' IS NOT NULL")
+          .where("object_changes -> 'shadow_banned' ->> 1 = ?", "true")
+          .group(Arel.sql("DATE(created_at)")).count
+
+        (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
           date = days_ago.days.ago.to_date
-          day_range = date.beginning_of_day..date.end_of_day
-
-          bans = PaperTrail::Version.where(item_type: "User", created_at: day_range)
-                                    .where("object_changes ->> 'banned' IS NOT NULL")
-                                    .where("object_changes -> 'banned' ->> 1 = ?", "true").count
-          unbans = PaperTrail::Version.where(item_type: "User", created_at: day_range)
-                                      .where("object_changes ->> 'banned' IS NOT NULL")
-                                      .where("object_changes -> 'banned' ->> 1 = ?", "false").count
-          shadow_bans = PaperTrail::Version.where(item_type: "User", created_at: day_range)
-                                           .where("object_changes ->> 'shadow_banned' IS NOT NULL")
-                                           .where("object_changes -> 'shadow_banned' ->> 1 = ?", "true").count
-
-          trend_data[date.to_s] = { bans: bans, unbans: unbans, shadow_bans: shadow_bans }
+          trend_data[date.to_s] = {
+            bans: bans_by_date[date] || 0,
+            unbans: unbans_by_date[date] || 0,
+            shadow_bans: shadow_bans_by_date[date] || 0
+          }
         end
-        trend_data
       end
     end
 
     def build_shop_order_trend_data
       Rails.cache.fetch("super_mega_order_trend", expires_in: 1.hour) do
-        trend_data = {}
-        # Get data for last 30 days - fraud dept only (pending, awaiting_verification, on_hold, rejected)
-        (0..29).reverse_each do |days_ago|
+        window_start = 29.days.ago.beginning_of_day
+        window_end = Time.current.end_of_day
+        states = %w[pending awaiting_verification rejected on_hold]
+
+        grouped = ShopOrder.where(updated_at: window_start..window_end, aasm_state: states)
+                           .group(Arel.sql("DATE(updated_at)"), :aasm_state).count
+
+        (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
           date = days_ago.days.ago.to_date
-          day_range = date.beginning_of_day..date.end_of_day
-
-          # Count shop orders by state on this day (fraud dept only)
-          states = %w[pending awaiting_verification rejected on_hold]
-          state_counts = ShopOrder.where(updated_at: day_range)
-                                  .where(aasm_state: states)
-                                  .group(:aasm_state).count
-
-          trend_data[date.to_s] = state_counts.transform_keys(&:to_s)
+          day_counts = {}
+          states.each { |s| day_counts[s] = grouped.fetch([ date, s ], 0) }
+          trend_data[date.to_s] = day_counts
         end
-        trend_data
       end
     end
 
     def build_report_trend_data
       Rails.cache.fetch("super_mega_report_trend", expires_in: 1.hour) do
-        trend_data = {}
-        # Get data for last 30 days
-        (0..29).reverse_each do |days_ago|
+        window_start = 29.days.ago.beginning_of_day
+        window_end = Time.current.end_of_day
+
+        grouped = Project::Report.where(updated_at: window_start..window_end)
+                                 .group(Arel.sql("DATE(updated_at)"), :reason).count
+
+        (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
           date = days_ago.days.ago.to_date
-          day_range = date.beginning_of_day..date.end_of_day
-
-          # Count fraud reports by reason on this day
-          reason_counts = Project::Report.where(updated_at: day_range)
-                                         .group(:reason).count
-
-          trend_data[date.to_s] = reason_counts
+          day_counts = {}
+          grouped.each do |(d, reason), count|
+            day_counts[reason] = count if d == date
+          end
+          trend_data[date.to_s] = day_counts
         end
-        trend_data
       end
     end
 
@@ -365,17 +409,30 @@ module Admin
         ]
         other_types = type_counts.keys.map(&:first).uniq - known_types
 
+        fulfilled_counts = ShopOrder.joins(:shop_item)
+                                    .where(aasm_state: "fulfilled")
+                                    .where.not(shop_items: { type: "ShopItem::FreeStickers" })
+                                    .group("shop_items.type").count
+
+        warehouse_has_stale = ShopOrder.joins(:shop_item)
+                                       .where(aasm_state: "awaiting_periodical_fulfillment")
+                                       .where(shop_items: { type: %w[ShopItem::WarehouseItem ShopItem::PileOfStickersItem] })
+                                       .where("shop_orders.awaiting_periodical_fulfillment_at <= ?", 3.days.ago)
+                                       .exists?
+
         {
-          all: calculate_type_totals(type_counts),
-          hq_mail: calculate_type_totals(type_counts, %w[ShopItem::HQMailItem ShopItem::LetterMail]),
-          third_party: calculate_type_totals(type_counts, %w[ShopItem::ThirdPartyPhysical ShopItem::Accessory ShopItem::ThirdPartyDigital]),
-          warehouse: calculate_type_totals(type_counts, %w[ShopItem::WarehouseItem ShopItem::PileOfStickersItem]),
-          other: calculate_type_totals(type_counts, other_types)
+          all: calculate_type_totals(type_counts, nil, fulfilled_counts),
+          hq_mail: calculate_type_totals(type_counts, %w[ShopItem::HQMailItem ShopItem::LetterMail], fulfilled_counts),
+          third_party: calculate_type_totals(type_counts, %w[ShopItem::ThirdPartyPhysical ShopItem::Accessory ShopItem::ThirdPartyDigital], fulfilled_counts),
+          warehouse: calculate_type_totals(type_counts, %w[ShopItem::WarehouseItem ShopItem::PileOfStickersItem], fulfilled_counts),
+          other: calculate_type_totals(type_counts, other_types, fulfilled_counts),
+          warehouse_has_stale: warehouse_has_stale
         }
       end
-      @fulfillment = cached_data || { all: {}, hq_mail: {}, third_party: {}, warehouse: {}, other: {} }
+      @fulfillment = cached_data || { all: {}, hq_mail: {}, third_party: {}, warehouse: {}, other: {}, warehouse_has_stale: false }
       @fulfillment_trend_data = build_fulfillment_trend_data
       @order_states_trend_data = build_order_states_trend_data
+      @recent_new_items = ShopItem.recently_added.enabled.includes(image_attachment: :blob).limit(12)
     end
 
     def load_fulfillment_stats_safely
@@ -384,9 +441,8 @@ module Admin
       Rails.logger.warn("[SuperMegaDashboard] Temporarily disabling fulfillment stats (#{e.class}): #{e.message}")
 
       blank_stats = {
-        pending: "—",
         awaiting: "—",
-        total: "—"
+        fulfilled: "—"
       }
 
       @fulfillment_temporarily_disabled = true
@@ -395,68 +451,78 @@ module Admin
         hq_mail: blank_stats.dup,
         third_party: blank_stats.dup,
         warehouse: blank_stats.dup,
-        other: blank_stats.dup
+        other: blank_stats.dup,
+        warehouse_has_stale: false
       }
       @fulfillment_trend_data = nil
       @order_states_trend_data = nil
+      @recent_new_items = ShopItem.none
     end
 
     def build_fulfillment_trend_data
       Rails.cache.fetch("super_mega_fulfillment_trend", expires_in: 1.hour) do
-        trend_data = {}
-        (0..29).reverse_each do |days_ago|
+        window_start = 29.days.ago.beginning_of_day
+        window_end = Time.current.end_of_day
+
+        fulfilled_by_date = ShopOrder.where(fulfilled_at: window_start..window_end)
+                                     .group(Arel.sql("DATE(fulfilled_at)")).count
+        created_by_date = ShopOrder.real.where(created_at: window_start..window_end)
+                                       .group(Arel.sql("DATE(created_at)")).count
+
+        (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
           date = days_ago.days.ago.to_date
-          day_range = date.beginning_of_day..date.end_of_day
-
-          fulfilled = ShopOrder.where(fulfilled_at: day_range).count
-          created = ShopOrder.real.where(created_at: day_range).count
-
-          trend_data[date.to_s] = { fulfilled: fulfilled, created: created }
+          trend_data[date.to_s] = {
+            fulfilled: fulfilled_by_date[date] || 0,
+            created: created_by_date[date] || 0
+          }
         end
-        trend_data
       end
     end
 
     def build_order_states_trend_data
       Rails.cache.fetch("super_mega_order_states_trend", expires_in: 1.hour) do
-        trend_data = {}
-        (0..29).reverse_each do |days_ago|
+        window_start = 29.days.ago.beginning_of_day
+        window_end = Time.current.end_of_day
+
+        pending_by_date = ShopOrder.real.where(created_at: window_start..window_end)
+                                       .group(Arel.sql("DATE(created_at)")).count
+        awaiting_by_date = ShopOrder.where(awaiting_periodical_fulfillment_at: window_start..window_end)
+                                    .group(Arel.sql("DATE(awaiting_periodical_fulfillment_at)")).count
+        fulfilled_by_date = ShopOrder.where(fulfilled_at: window_start..window_end)
+                                     .group(Arel.sql("DATE(fulfilled_at)")).count
+        on_hold_by_date = ShopOrder.where(on_hold_at: window_start..window_end)
+                                   .group(Arel.sql("DATE(on_hold_at)")).count
+        rejected_by_date = ShopOrder.where(rejected_at: window_start..window_end)
+                                    .group(Arel.sql("DATE(rejected_at)")).count
+
+        (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
           date = days_ago.days.ago.to_date
-          day_range = date.beginning_of_day..date.end_of_day
-
-          pending = ShopOrder.real.where(created_at: day_range).count
-          awaiting = ShopOrder.where(awaiting_periodical_fulfillment_at: day_range).count
-          fulfilled = ShopOrder.where(fulfilled_at: day_range).count
-          on_hold = ShopOrder.where(on_hold_at: day_range).count
-          closed = fulfilled + ShopOrder.where(rejected_at: day_range).count
-
+          fulfilled = fulfilled_by_date[date] || 0
+          rejected = rejected_by_date[date] || 0
           trend_data[date.to_s] = {
-            pending: pending,
-            awaiting_periodical_fulfillment: awaiting,
-            on_hold: on_hold,
-            closed: closed
+            pending: pending_by_date[date] || 0,
+            awaiting_periodical_fulfillment: awaiting_by_date[date] || 0,
+            on_hold: on_hold_by_date[date] || 0,
+            closed: fulfilled + rejected
           }
         end
-        trend_data
       end
     end
 
-    def calculate_type_totals(type_counts, filter_types = nil)
-      pending = 0
+    def calculate_type_totals(type_counts, filter_types = nil, fulfilled_counts = {})
       awaiting = 0
 
       type_counts.each do |(type, state), count|
         next if filter_types && !filter_types.include?(type)
 
-        case state
-        when "pending"
-          pending += count
-        when "awaiting_periodical_fulfillment"
-          awaiting += count
-        end
+        awaiting += count if state == "awaiting_periodical_fulfillment"
       end
 
-      { pending: pending, awaiting: awaiting, total: pending + awaiting }
+      fulfilled = fulfilled_counts.sum do |type, count|
+        (filter_types.nil? || filter_types.include?(type)) ? count : 0
+      end
+
+      { awaiting: awaiting, fulfilled: fulfilled }
     end
 
     def load_support_stats
@@ -783,19 +849,25 @@ module Admin
     end
 
     def build_sidequest_trend_data(shipped_entries)
+      window_start = 29.days.ago.beginning_of_day
+      window_end = Time.current.end_of_day
+
+      submitted_by_date = shipped_entries.where(created_at: window_start..window_end)
+                                         .group(Arel.sql("DATE(sidequest_entries.created_at)")).count
+      approved_by_date = shipped_entries.approved.where(reviewed_at: window_start..window_end)
+                                                 .group(Arel.sql("DATE(reviewed_at)")).count
+      shipped_by_date = Project.joins(:ship_events)
+                               .where(posts: { created_at: window_start..window_end })
+                               .group(Arel.sql("DATE(posts.created_at)"))
+                               .distinct
+                               .count
+
       (0..29).reverse_each.each_with_object({}) do |days_ago, trend_data|
         date = days_ago.days.ago.to_date
-        day_range = date.beginning_of_day..date.end_of_day
-        daily_submissions = shipped_entries.where(created_at: day_range)
-        shipped_projects_count = Project.joins(:ship_events)
-                                        .where(posts: { created_at: day_range })
-                                        .distinct
-                                        .count
-
         trend_data[date.to_s] = {
-          submitted: daily_submissions.count,
-          shipped_projects: shipped_projects_count,
-          approved: shipped_entries.approved.where(reviewed_at: day_range).count
+          submitted: submitted_by_date[date] || 0,
+          shipped_projects: shipped_by_date[date] || 0,
+          approved: approved_by_date[date] || 0
         }
       end
     end
@@ -1269,6 +1341,45 @@ module Admin
       else
         0
       end
+    end
+
+    def balance_color_class(balance_cents)
+      balance_dollars = balance_cents.to_i / 100
+      case balance_dollars
+      when 0..1999
+        "balance--red"
+      when 2000..9999
+        "balance--yellow"
+      else
+        "balance--green"
+      end
+    end
+
+    helper_method :balance_color_class
+
+    def load_hcb_expenses
+      data = Rails.cache.fetch("super_mega_hcb_stats", expires_in: 5.minutes) do
+        response = Faraday.get("https://hcb.hackclub.com/api/v3/organizations/flavortown")
+
+        if response.success?
+          body = JSON.parse(response.body)
+          balance = body.dig("balances", "balance_cents") || 0
+          total_raised = body.dig("balances", "total_raised") || 0
+
+          {
+            balance_cents: balance,
+            total_raised_cents: total_raised,
+            total_expenses_cents: total_raised - balance
+          }
+        end
+      rescue StandardError => e
+        { error: "Error fetching HCB stats: #{e.message}" }
+      end
+
+      @hcb_error = data[:error]
+      @balance_cents = data[:balance_cents] || 0
+      @total_expenses_cents = data[:total_expenses_cents] || 0
+      @total_raised_cents = data[:total_raised_cents] || 0
     end
   end
 end
