@@ -13,6 +13,7 @@ module Admin
 
       def load_payouts_stats
         cached_data = Rails.cache.fetch("super_mega_payouts", expires_in: 10.minutes) do
+          payouts_cap = LedgerEntry.sum(:amount)
           total_distributed_cookies = LedgerEntry.where("amount > 0").sum(:amount)
           used_cookies = LedgerEntry.where("amount < 0").sum(:amount).abs
           cookie_utilization_percentage = ((used_cookies.to_f / total_distributed_cookies) * 100).round(2)
@@ -31,12 +32,14 @@ module Admin
           end
 
           {
+            payouts_cap: payouts_cap,
             cookie_utilization_percentage: cookie_utilization_percentage,
             dollars_per_hour: dollars_per_hour,
             expenses_dollars_per_hour: expenses_dollars_per_hour
           }
         end
 
+        @payouts_cap = cached_data&.dig(:payouts_cap) || 0
         @dollars_per_hour = cached_data&.dig(:dollars_per_hour) || 0
         @expenses_dollars_per_hour = cached_data&.dig(:expenses_dollars_per_hour) || 0
         @cookie_utilization_percentage = cached_data&.dig(:cookie_utilization_percentage) || 0
